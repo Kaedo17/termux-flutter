@@ -59,7 +59,7 @@ install_system_packages() {
     step 1 "System packages"
     pkg update -y
     pkg install -y openjdk-17 which git curl unzip dart aapt aapt2 \
-        android-tools ninja cmake build-essential termux-properties
+        android-tools ninja cmake build-essential
     log "System packages installed."
 }
 
