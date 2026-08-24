@@ -107,21 +107,28 @@ done
 Flutter downloads a glibc Linux Dart SDK that can't run on Android.
 The native Termux Dart (android_arm64) works correctly.
 
-```bash
-# Back up original Dart
-mv ~/flutter/bin/cache/dart-sdk/bin/dart ~/flutter/bin/cache/dart-sdk/bin/dart.glibc.bak
+> **Important:** You must run `flutter --version` first to trigger the Dart SDK download,
+> then replace the binaries. This is done in the "Rebuild flutter_tools snapshot" step below.
 
-# Symlink to native Termux Dart
+### Rebuild flutter_tools snapshot
+
+First, download the Dart SDK cache and initialize the flutter_tools dependencies:
+
+```bash
+export ANDROID_HOME="$HOME/android-sdk"
+export JAVA_HOME="/data/data/com.termux/files/usr"
+export PATH="$HOME/flutter/bin:$PATH"
+
+# This downloads the Dart SDK and triggers initial setup
+flutter --version 2>&1 || true
+
+# Now the dart-sdk cache exists - replace the glibc Dart binary
+mv ~/flutter/bin/cache/dart-sdk/bin/dart ~/flutter/bin/cache/dart-sdk/bin/dart.glibc.bak
 ln -sf /data/data/com.termux/files/usr/bin/dart ~/flutter/bin/cache/dart-sdk/bin/dart
 ln -sf /data/data/com.termux/files/usr/bin/dartaotruntime ~/flutter/bin/cache/dart-sdk/bin/dartaotruntime
 ln -sf /data/data/com.termux/files/usr/bin/dartvm ~/flutter/bin/cache/dart-sdk/bin/dartvm
-```
 
-### Replace all Dart snapshots with Android-compatible ones
-
-The engine's precompiled snapshots target Linux, but our VM is Android.
-
-```bash
+# Replace Dart snapshots
 cd ~/flutter/bin/cache/dart-sdk/bin/snapshots
 for f in *.snapshot; do
   termux_snap="/data/data/com.termux/files/usr/lib/dart-sdk/bin/snapshots/$f"
@@ -130,13 +137,9 @@ for f in *.snapshot; do
     ln -sf "$termux_snap" "$f"
   fi
 done
-```
 
-### Rebuild flutter_tools snapshot
-
-The snapshot must be compiled with the native Dart (Android target).
-
-```bash
+# Get flutter_tools dependencies and rebuild snapshot
+cd ~/flutter/packages/flutter_tools && dart pub get
 dart compile kernel \
   ~/flutter/packages/flutter_tools/bin/flutter_tools.dart \
   -o ~/flutter/bin/cache/flutter_tools.snapshot
@@ -177,6 +180,37 @@ final List<String>? binaryDirs = artifacts[_platform.operatingSystem];
 // To:
 final String os = _platform.operatingSystem == 'android' ? 'linux' : _platform.operatingSystem;
 final List<String>? binaryDirs = artifacts[os];
+```
+
+### Patch `os.dart` (host platform detection)
+
+**File:** `~/flutter/packages/flutter_tools/lib/src/base/os.dart`
+
+Flutter uses `Platform.version` to detect the host ABI. On Android/Termux this returns `android_arm64` which isn't mapped to any `HostPlatform`. Add Android ABI cases:
+
+```dart
+// Find the hostPlatform getter that returns switch (_currentAbi)
+// Add before the default case:
+//   Abi.androidArm64 => HostPlatform.linux_arm64,
+//   Abi.androidArm => HostPlatform.linux_arm64,
+//   Abi.androidX64 => HostPlatform.linux_x64,
+
+// Full patched block:
+HostPlatform get hostPlatform {
+  return switch (_currentAbi) {
+    Abi.macosX64 => HostPlatform.darwin_x64,
+    Abi.macosArm64 => HostPlatform.darwin_arm64,
+    Abi.linuxX64 => HostPlatform.linux_x64,
+    Abi.linuxArm64 => HostPlatform.linux_arm64,
+    Abi.linuxRiscv64 => HostPlatform.linux_riscv64,
+    Abi.windowsX64 => HostPlatform.windows_x64,
+    Abi.windowsArm64 => HostPlatform.windows_arm64,
+    Abi.androidArm64 => HostPlatform.linux_arm64,
+    Abi.androidArm => HostPlatform.linux_arm64,
+    Abi.androidX64 => HostPlatform.linux_x64,
+    _ => throw UnsupportedError('Unsupported host platform: $_currentAbi'),
+  };
+}
 ```
 
 ### Rebuild flutter_tools snapshot after patching
@@ -260,6 +294,43 @@ mv ~/android-sdk/cmake/3.22.1/bin/ninja ~/android-sdk/cmake/3.22.1/bin/ninja.lin
 ln -sf /data/data/com.termux/files/usr/bin/ninja ~/android-sdk/cmake/3.22.1/bin/ninja
 ```
 
+### Create impellerc stub
+
+The `impellerc` shader compiler in `linux-arm64/` is a glibc Linux binary that can't run
+on Android. Create a no-op stub that copies inputs to outputs (shaders will still be compiled
+by the engine at runtime):
+
+```bash
+cat > ~/flutter/bin/cache/artifacts/engine/linux-arm64/impellerc << 'STUB'
+#!/data/data/com.termux/files/usr/bin/bash
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    --sl) SL="$2"; shift 2 ;;
+    --spirv) SPIRV="$2"; shift 2 ;;
+    --input) INPUT="$2"; shift 2 ;;
+    *) shift ;;
+  esac
+done
+if [[ -n "$INPUT" && -n "$SL" ]]; then
+  cp "$INPUT" "$SL" 2>/dev/null || touch "$SL"
+fi
+if [[ -n "$SL" && -n "$SPIRV" ]]; then
+  cp "$SL" "$SPIRV" 2>/dev/null || touch "$SPIRV"
+fi
+exit 0
+STUB
+chmod +x ~/flutter/bin/cache/artifacts/engine/linux-arm64/impellerc
+```
+
+### Replace SDK ADB with native Termux ADB
+
+The SDK's platform-tools ADB is x86_64. Replace it with the native Termux version:
+
+```bash
+rm -f ~/android-sdk/platform-tools/adb
+ln -sf /data/data/com.termux/files/usr/bin/adb ~/android-sdk/platform-tools/adb
+```
+
 ---
 
 ## Step 6: Configure Environment Variables
@@ -298,7 +369,11 @@ org.gradle.internal.http.connectionTimeout=120000
 org.gradle.internal.http.socketTimeout=120000
 org.gradle.daemon=true
 org.gradle.parallel=true
+android.aapt2FromMavenOverride=/data/data/com.termux/files/usr/bin/aapt2
 ```
+
+> **Note:** `android.aapt2FromMavenOverride` is critical. Gradle downloads its own x86_64 `aapt2`
+> from Maven which can't run on Android. This tells Gradle to use the native Termux `aapt2` instead.
 
 ---
 
@@ -378,6 +453,11 @@ flutter run
 
 The platform.dart patch wasn't applied. Rebuild flutter_tools.snapshot.
 
+### "Unsupported host platform: android_arm64"
+
+The os.dart patch wasn't applied. Flutter needs `Abi.androidArm64` mapped to `HostPlatform.linux_arm64`.
+Patch `~/flutter/packages/flutter_tools/lib/src/base/os.dart` and rebuild flutter_tools.snapshot.
+
 ### "Snapshot not compatible with current VM configuration"
 
 Dart snapshots are mismatched. Ensure all snapshots in
@@ -396,6 +476,17 @@ The cmake wrapper may not be injecting `ANDROID_HOST_TAG`. Check that
 
 Ensure `~/android-sdk/build-tools/36.0.0/aapt2` points to Termux's native aapt2.
 
+### "INSTALL_FAILED_USER_RESTRICTED" when running
+
+The device requires USB install permission. Either:
+- Accept the install prompt on the device, or
+- Use `adb install -r -d` to force-replace
+
+### "The file or directory could not be found" (impellerc)
+
+The `impellerc` shader compiler is a glibc binary. Create the stub wrapper
+described in Step 5.
+
 ---
 
 ## File Layout
@@ -405,6 +496,7 @@ Ensure `~/android-sdk/build-tools/36.0.0/aapt2` points to Termux's native aapt2.
 ~/flutter/bin/cache/dart-sdk/bin/dart -> /data/.../usr/bin/dart (symlinked)
 ~/flutter/bin/cache/dart-sdk/bin/snapshots/*.snapshot -> Termux equivalents
 ~/flutter/bin/cache/flutter_tools.snapshot (compiled with native dart)
+~/flutter/bin/cache/artifacts/engine/linux-arm64/impellerc (stub wrapper)
 
 ~/android-sdk/
   cmdline-tools/latest/bin/sdkmanager
@@ -412,6 +504,8 @@ Ensure `~/android-sdk/build-tools/36.0.0/aapt2` points to Termux's native aapt2.
   build-tools/36.0.0/
     aapt -> /data/.../usr/bin/aapt (symlinked)
     aapt2 -> /data/.../usr/bin/aapt2 (symlinked)
+  platform-tools/
+    adb -> /data/.../usr/bin/adb (symlinked)
   cmake/3.22.1/bin/cmake (wrapper script injecting ANDROID_HOST_TAG)
   cmake/3.22.1/bin/ninja -> /data/.../usr/bin/ninja (symlinked)
   ndk/28.2.13676358/toolchains/llvm/prebuilt/linux-x86_64/
@@ -419,6 +513,6 @@ Ensure `~/android-sdk/build-tools/36.0.0/aapt2` points to Termux's native aapt2.
     sysroot/
 
 ~/.gradle/
-  gradle.properties
+  gradle.properties (includes android.aapt2FromMavenOverride)
   caches/.../transforms/ (aapt2 replaced in JAR)
 ```
