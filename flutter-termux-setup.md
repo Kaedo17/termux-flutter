@@ -447,6 +447,113 @@ flutter run
 
 ---
 
+## Step 10: Code OSS / VS Code Setup
+
+Flutter SDK works in Code OSS but requires some extra configuration because
+the extension host can't follow symlinks to Termux paths.
+
+### Install Flutter & Dart extensions
+
+```
+ext install Dart-Code.flutter
+ext install Dart-Code.dart-code
+```
+
+### Settings (real config location)
+
+Code OSS on Termux reads settings from `~/.config/Code - OSS/User/settings.json`:
+
+```json
+{
+    "dart.flutterSdkPath": "/data/data/com.termux/files/home/flutter",
+    "dart.sdkPath": "/data/data/com.termux/files/usr/lib/dart-sdk",
+    "dart.enableSdkFormatters": true,
+    "flutter.activateAndroid": true,
+    "terminal.integrated.env.linux": {
+        "PATH": "/data/data/com.termux/files/home/flutter/bin:/data/data/com.termux/files/usr/bin:${env:PATH}",
+        "ANDROID_HOME": "/data/data/com.termux/files/home/android-sdk",
+        "ANDROID_SDK_ROOT": "/data/data/com.termux/files/home/android-sdk"
+    }
+}
+```
+
+### Environment variables for extension host
+
+`terminal.integrated.env.linux` only affects the integrated terminal.
+The Flutter extension daemon runs in the extension host process which
+inherits env from when Code OSS was launched. To fix this, wrap the
+Code OSS binary:
+
+```bash
+mv /data/data/com.termux/files/usr/bin/code-oss \
+   /data/data/com.termux/files/usr/bin/code-oss.real
+
+cat > /data/data/com.termux/files/usr/bin/code-oss << 'WRAPPER'
+#!/data/data/com.termux/files/usr/bin/bash
+export ANDROID_HOME="$HOME/android-sdk"
+export ANDROID_SDK_ROOT="$ANDROID_HOME"
+export PATH="$HOME/flutter/bin:$ANDROID_HOME/cmdline-tools/latest/bin:$ANDROID_HOME/build-tools/36.0.0:$ANDROID_HOME/platform-tools:$PATH"
+exec /data/data/com.termux/files/usr/bin/code-oss.real "$@"
+WRAPPER
+chmod 755 /data/data/com.termux/files/usr/bin/code-oss
+```
+
+### Replace symlinks with wrapper scripts
+
+Code OSS (Electron/Node.js) can't resolve symlinks to Termux paths.
+Replace symlinks in `flutter/bin/cache/dart-sdk/bin/` with wrapper scripts:
+
+```bash
+DART_SDK_BIN=~/flutter/bin/cache/dart-sdk/bin
+
+rm -f "$DART_SDK_BIN/dart"
+cat > "$DART_SDK_BIN/dart" << 'EOF'
+#!/data/data/com.termux/files/usr/bin/sh
+exec /data/data/com.termux/files/usr/lib/dart-sdk/bin/dart "$@"
+EOF
+chmod 755 "$DART_SDK_BIN/dart"
+
+rm -f "$DART_SDK_BIN/dartaotruntime"
+cat > "$DART_SDK_BIN/dartaotruntime" << 'EOF'
+#!/data/data/com.termux/files/usr/bin/sh
+exec /data/data/com.termux/files/usr/lib/dart-sdk/bin/dartaotruntime "$@"
+EOF
+chmod 755 "$DART_SDK_BIN/dartaotruntime"
+```
+
+**Important:** Snapshot files in `bin/snapshots/` must be **actual copies**
+(not wrapper scripts). They are ELF binaries read directly by dartaotruntime:
+
+```bash
+SNAPSHOTS_DIR=~/flutter/bin/cache/dart-sdk/bin/snapshots
+TERMUX_SNAPSHOTS=/data/data/com.termux/files/usr/lib/dart-sdk/bin/snapshots
+for f in "$TERMUX_SNAPSHOTS"/*; do
+    fname=$(basename "$f")
+    [ -f "$f" ] || continue
+    rm -f "$SNAPSHOTS_DIR/$fname"
+    cp "$f" "$SNAPSHOTS_DIR/$fname"
+done
+```
+
+### Fix gradlew shebang for new projects
+
+`flutter create` generates `gradlew` with `#!/usr/bin/env bash` which
+doesn't exist in Termux. Patch the cached template:
+
+```bash
+sed -i '1s|#!/usr/bin/env bash|#!/data/data/com.termux/files/usr/bin/env bash|' \
+  ~/flutter/bin/cache/artifacts/gradle_wrapper/gradlew
+```
+
+For existing projects, fix them individually:
+
+```bash
+sed -i '1s|#!/usr/bin/env bash|#!/data/data/com.termux/files/usr/bin/env bash|' \
+  ~/your_project/android/gradlew
+```
+
+---
+
 ## Troubleshooting
 
 ### "Unsupported operating system: android"
@@ -487,16 +594,39 @@ The device requires USB install permission. Either:
 The `impellerc` shader compiler is a glibc binary. Create the stub wrapper
 described in Step 5.
 
+### "Could not find Dart in your Flutter SDK" (Code OSS)
+
+The extension can't resolve symlinks. Replace symlinks with wrapper scripts
+as described in Step 10.
+
+### "The file or directory could not be found" (gradlew)
+
+The `gradlew` shebang is `#!/usr/bin/env bash` which doesn't exist in Termux.
+Patch it as described in Step 10 ("Fix gradlew shebang").
+
+### Device not showing in Code OSS
+
+The Flutter extension daemon runs without `ANDROID_HOME` because the
+extension host process doesn't inherit `.bashrc` env vars. Apply the
+Code OSS wrapper from Step 10.
+
+### "Bad ELF magic" on frontend_server_aot.dart.snapshot
+
+Snapshot files were replaced with wrapper scripts instead of actual copies.
+Restore them with the copy command in Step 10.
+
 ---
 
 ## File Layout
 
 ```
 ~/flutter/                          Flutter SDK
-~/flutter/bin/cache/dart-sdk/bin/dart -> /data/.../usr/bin/dart (symlinked)
-~/flutter/bin/cache/dart-sdk/bin/snapshots/*.snapshot -> Termux equivalents
+~/flutter/bin/cache/dart-sdk/bin/dart (wrapper script -> Termux dart)
+~/flutter/bin/cache/dart-sdk/bin/dartaotruntime (wrapper script -> Termux dartaotruntime)
+~/flutter/bin/cache/dart-sdk/bin/snapshots/*.snapshot (copies of Termux snapshots)
 ~/flutter/bin/cache/flutter_tools.snapshot (compiled with native dart)
 ~/flutter/bin/cache/artifacts/engine/linux-arm64/impellerc (stub wrapper)
+~/flutter/bin/cache/artifacts/gradle_wrapper/gradlew (patched shebang)
 
 ~/android-sdk/
   cmdline-tools/latest/bin/sdkmanager
@@ -515,4 +645,8 @@ described in Step 5.
 ~/.gradle/
   gradle.properties (includes android.aapt2FromMavenOverride)
   caches/.../transforms/ (aapt2 replaced in JAR)
+
+/data/data/com.termux/files/usr/bin/code-oss (wrapper -> code-oss.real)
+/data/data/com.termux/files/usr/bin/code-oss.real (original Code OSS binary)
+~/.config/Code - OSS/User/settings.json (Flutter SDK paths)
 ```
