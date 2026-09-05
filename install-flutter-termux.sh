@@ -150,23 +150,45 @@ patch_flutter_platform() {
 
     local PLATFORM_DART="$FLUTTER_ROOT/packages/flutter_tools/lib/src/base/platform.dart"
     local CACHE_DART="$FLUTTER_ROOT/packages/flutter_tools/lib/src/flutter_cache.dart"
+    local OS_DART="$FLUTTER_ROOT/packages/flutter_tools/lib/src/base/os.dart"
+    local SDK_DART="$FLUTTER_ROOT/packages/flutter_tools/lib/src/android/android_sdk.dart"
+    local patched=false
 
     # Patch platform.dart - make isLinux return true for Android
-    if ! grep -q "operatingSystem == 'android'" "$PLATFORM_DART" | head -1; then
+    if ! grep -q "operatingSystem == 'android'" "$PLATFORM_DART" 2>/dev/null; then
         sed -i "s|bool get isLinux => operatingSystem == 'linux';|bool get isLinux => operatingSystem == 'linux' || operatingSystem == 'android';|" "$PLATFORM_DART"
         sed -i "s|bool get isAndroid => operatingSystem == 'android';|bool get isAndroid => false;|" "$PLATFORM_DART"
+        patched=true
     fi
 
     # Patch flutter_cache.dart - map android to linux for artifact lookup
     if ! grep -q "operatingSystem == 'android'" "$CACHE_DART" 2>/dev/null; then
         sed -i "s|final List<String>? binaryDirs = artifacts\[_platform.operatingSystem\];|final String os = _platform.operatingSystem == 'android' ? 'linux' : _platform.operatingSystem; final List<String>? binaryDirs = artifacts[os];|" "$CACHE_DART"
+        patched=true
     fi
 
-    log "Rebuilding flutter_tools snapshot..."
-    rm -f "$FLUTTER_ROOT/bin/cache/flutter_tools.snapshot"
-    dart compile kernel \
-        "$FLUTTER_ROOT/packages/flutter_tools/bin/flutter_tools.dart" \
-        -o "$FLUTTER_ROOT/bin/cache/flutter_tools.snapshot"
+    # Patch os.dart - map Abi.androidArm64 to HostPlatform.linux_arm64
+    if ! grep -q "Abi.androidArm64" "$OS_DART" 2>/dev/null; then
+        sed -i "/Abi.windowsArm64 => HostPlatform.windows_arm64,/a\\
+      Abi.androidArm64 => HostPlatform.linux_arm64,\\
+      Abi.androidArm => HostPlatform.linux_arm64,\\
+      Abi.androidX64 => HostPlatform.linux_x64," "$OS_DART"
+        patched=true
+    fi
+
+    # Patch android_sdk.dart - fix null check crash on NDK path resolution
+    if grep -q '_llvmHostDirectoryName\[platform.operatingSystem\]!' "$SDK_DART" 2>/dev/null; then
+        sed -i "s|_llvmHostDirectoryName\[platform.operatingSystem\]!|_llvmHostDirectoryName[platform.operatingSystem] ?? 'linux-x86_64'|" "$SDK_DART"
+        patched=true
+    fi
+
+    if [ "$patched" = true ]; then
+        log "Rebuilding flutter_tools snapshot..."
+        rm -f "$FLUTTER_ROOT/bin/cache/flutter_tools.snapshot"
+        dart compile kernel \
+            "$FLUTTER_ROOT/packages/flutter_tools/bin/flutter_tools.dart" \
+            -o "$FLUTTER_ROOT/bin/cache/flutter_tools.snapshot"
+    fi
     log "Platform patches applied."
 }
 
@@ -291,6 +313,7 @@ org.gradle.internal.http.connectionTimeout=120000
 org.gradle.internal.http.socketTimeout=120000
 org.gradle.daemon=true
 org.gradle.parallel=true
+android.aapt2FromMavenOverride=/data/data/com.termux/files/usr/bin/aapt2
 EOF
     log "Gradle configured."
 }

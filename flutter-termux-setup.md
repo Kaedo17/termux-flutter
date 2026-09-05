@@ -190,27 +190,25 @@ Flutter uses `Platform.version` to detect the host ABI. On Android/Termux this r
 
 ```dart
 // Find the hostPlatform getter that returns switch (_currentAbi)
-// Add before the default case:
-//   Abi.androidArm64 => HostPlatform.linux_arm64,
-//   Abi.androidArm => HostPlatform.linux_arm64,
-//   Abi.androidX64 => HostPlatform.linux_x64,
+// Add after the Abi.windowsArm64 case:
+      Abi.androidArm64 => HostPlatform.linux_arm64,
+      Abi.androidArm => HostPlatform.linux_arm64,
+      Abi.androidX64 => HostPlatform.linux_x64,
+```
 
-// Full patched block:
-HostPlatform get hostPlatform {
-  return switch (_currentAbi) {
-    Abi.macosX64 => HostPlatform.darwin_x64,
-    Abi.macosArm64 => HostPlatform.darwin_arm64,
-    Abi.linuxX64 => HostPlatform.linux_x64,
-    Abi.linuxArm64 => HostPlatform.linux_arm64,
-    Abi.linuxRiscv64 => HostPlatform.linux_riscv64,
-    Abi.windowsX64 => HostPlatform.windows_x64,
-    Abi.windowsArm64 => HostPlatform.windows_arm64,
-    Abi.androidArm64 => HostPlatform.linux_arm64,
-    Abi.androidArm => HostPlatform.linux_arm64,
-    Abi.androidX64 => HostPlatform.linux_x64,
-    _ => throw UnsupportedError('Unsupported host platform: $_currentAbi'),
-  };
-}
+### Patch `android_sdk.dart` (NDK path resolution)
+
+**File:** `~/flutter/packages/flutter_tools/lib/src/android/android_sdk.dart`
+
+Flutter's NDK path lookup crashes with `Null check operator used on a null value`
+when `Platform.operatingSystem` doesn't exactly match the `_llvmHostDirectoryName`
+map. Add a safe fallback:
+
+```dart
+// Find (around line 413):
+.childDirectory(_llvmHostDirectoryName[platform.operatingSystem]!)
+// Replace with:
+.childDirectory(_llvmHostDirectoryName[platform.operatingSystem] ?? 'linux-x86_64')
 ```
 
 ### Rebuild flutter_tools snapshot after patching
@@ -393,11 +391,15 @@ flutter doctor -v
 
 Expected output:
 ```
-[✓] Flutter (Channel stable, 3.44.8)
+[✓] Flutter (Channel stable, 3.x.x)
 [✓] Android toolchain - develop for Android devices (Android SDK 36.0.0)
 [✓] Connected device (1 available)
 [✓] Network resources
 ```
+
+The Android toolchain may show warnings about NDK version — this is normal when
+using a custom NDK build. The important thing is that it resolves the clang path
+without crashing.
 
 ---
 
@@ -564,6 +566,19 @@ The platform.dart patch wasn't applied. Rebuild flutter_tools.snapshot.
 
 The os.dart patch wasn't applied. Flutter needs `Abi.androidArm64` mapped to `HostPlatform.linux_arm64`.
 Patch `~/flutter/packages/flutter_tools/lib/src/base/os.dart` and rebuild flutter_tools.snapshot.
+
+### "Null check operator used on a null value" in getNdkBinaryPath
+
+The `android_sdk.dart` NDK path lookup crashes when `_llvmHostDirectoryName[platform.operatingSystem]`
+returns null. Patch the file to use a fallback:
+
+```bash
+sed -i "s|_llvmHostDirectoryName\[platform.operatingSystem\]!|_llvmHostDirectoryName[platform.operatingSystem] ?? 'linux-x86_64'|" \
+  ~/flutter/packages/flutter_tools/lib/src/android/android_sdk.dart
+rm -f ~/flutter/bin/cache/flutter_tools.snapshot
+dart compile kernel ~/flutter/packages/flutter_tools/bin/flutter_tools.dart \
+  -o ~/flutter/bin/cache/flutter_tools.snapshot
+```
 
 ### "Snapshot not compatible with current VM configuration"
 
